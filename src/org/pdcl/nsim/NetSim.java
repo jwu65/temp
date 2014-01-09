@@ -2,6 +2,9 @@ package org.pdcl.nsim;
 
 import java.io.*;
 import java.util.LinkedList;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.PriorityQueue;
 
 public class NetSim {
 
@@ -13,12 +16,255 @@ public class NetSim {
 
   int i;
 
+  long step;
+
   NetSim() throws Exception {
     i=10;
+    step = 0;
   }
 
   void run(String[] args) throws Exception {
-    System.out.println("i="+i);
+
+    SimWorld hWorld = new SimWorld();
+
+    hWorld.eventAdd(new SimEvent( 1001, "3rd"));
+    hWorld.eventAdd(new SimEvent( 11, "1st"));
+    hWorld.eventAdd(new SimEvent( 101, "2nd"));
+
+    hWorld.print();
+  }
+
+  private class SimEvent {
+    int id;
+    long tick;
+    String msg;
+
+    int type;// 10-reserved, 20-shuffle, 30-write
+
+    ArrayList<SimEvent> parentEvents;
+    ArrayList<SimEvent> childEvents;
+
+    SimEvent( long tick, String msg) {
+      this.tick = tick;
+      this.msg = msg;
+    }
+
+    public void setTime(long tick) {
+      this.tick = tick;
+    }
+
+    public void print() {
+      System.out.println("Tick: "+tick+" Event: "+msg);
+    }
+
+  }
+
+  private class EventComparator implements Comparator<SimEvent> {
+    @Override
+    public int compare( SimEvent e1, SimEvent e2) {
+      return Long.valueOf(e1.tick).compareTo(e2.tick);
+    }
+  }
+
+  private class SimWorld {
+
+    long tick;
+    long ending;
+    Cluster hadoopCluster;
+
+    EventComparator eQueueCom;
+    PriorityQueue<SimEvent> eQueue;
+
+    SimWorld() {
+      this.tick = -1;
+      this.ending = 100;
+      this.eQueueCom = new EventComparator();
+      this.eQueue = new PriorityQueue<SimEvent>( 100, this.eQueueCom);
+
+      hadoopCluster = new Cluster();
+      hadoopCluster.generate();
+    }
+
+    void eventAdd(SimEvent e) {
+      eQueue.add(e);
+    }
+
+    SimEvent eventPoll() {
+      return eQueue.poll();
+    }
+
+    void print() {
+      while(!eQueue.isEmpty()) {
+        SimEvent e = eventPoll();
+        e.print();
+      }
+      hadoopCluster.printAll();
+    }
+
+  }
+
+  private class Flow {
+
+    Vertex srcVertex;
+    Vertex dstVertex;
+
+    LinkedList<Link> linkRoute;
+
+    float flowBw; // KB/step , KB/100ns, x10MB/s 
+    float srcBwMax;
+    float dstBwMax;
+
+    float dataSize;
+
+  }
+
+  private class Vertex {
+
+    int type;// 1core, 2tor, 3node, 4slot
+    int id;
+
+    LinkedList<Link> outLinks;
+    LinkedList<Link> inLinks;
+
+    LinkedList<Flow> flows;
+
+    Vertex(int type, int id) {
+      this.type = type;
+      this.id = id;
+      this.outLinks = new LinkedList<Link>();
+      this.inLinks = new LinkedList<Link>();
+      this.flows = new LinkedList<Flow>();
+    }
+
+    void connectWith( Vertex vert, float bw) {
+      Link out = new Link( this, vert, bw);
+      Link in = new Link( vert, this, bw);
+
+      this.outLinks.add(out);
+      this.inLinks.add(in);
+      vert.outLinks.add(in);
+      vert.inLinks.add(out);
+    }
+  }
+
+  private class Link {
+
+    Vertex srcVert;
+    Vertex dstVert;
+
+    float linkBw;
+    float linkBwMax;
+
+    LinkedList<Flow> flows;
+
+    Link( Vertex srcVert, Vertex dstVert, float linkBwMax) {
+      this.srcVert = srcVert;
+      this.dstVert = dstVert;
+      this.linkBwMax = linkBwMax;
+      this.linkBw = 0;
+      this.flows = new LinkedList<Flow>();
+    }
+  }
+
+  private class Cluster {
+    
+    int numCore = 0;
+    int numTor = 0;
+    int numNodePerTor = 0;
+    int numSlotPerNode = 0;
+
+    float bwCT = 0;
+    float bwTN = 0;
+    float bwNS = 0;
+
+    Vertex[] cores = null;
+    Vertex[] tors = null;
+    Vertex[] nodes = null;
+    Vertex[] slots = null;
+
+    Cluster() {
+      bwCT = 200;
+      bwTN = 100;
+      bwNS = 1000;
+
+      numCore = 2;
+      numTor = 3;
+      numNodePerTor = 4;
+      numSlotPerNode = 2;
+    }
+
+    void generate() {
+
+      cores = new Vertex[numCore];
+      for(int i=0; i<numCore; i++) {
+        cores[i] = new Vertex( 1, i);
+      }
+
+      tors = new Vertex[numTor];
+      for(int i=0; i<numTor; i++) {
+        tors[i] = new Vertex( 2, i);
+      }
+
+      nodes = new Vertex[numNodePerTor*numTor];
+      for(int i=0; i<numNodePerTor*numTor; i++) {
+        nodes[i] = new Vertex( 3, i);
+      }
+
+      slots = new Vertex[numSlotPerNode*numNodePerTor*numTor];
+      for(int i=0; i<numSlotPerNode*numNodePerTor*numTor; i++){
+        slots[i] = new Vertex( 4, i);
+      }
+
+      for(int i=0; i<numCore; i++) {
+        Vertex core = cores[i];
+        
+        for(int j=0; j<numTor; j++) {
+          core.connectWith( tors[j], bwCT);
+        }
+      }
+
+      for(int i=0; i<numTor; i++){
+        Vertex tor = tors[i];
+
+        for(int j=0; j<numNodePerTor; j++) {
+          Vertex node = nodes[i*numNodePerTor+j];
+          tor.connectWith( node, bwTN);
+
+          for(int k=0; k<numSlotPerNode; k++) {
+            node.connectWith( slots[(i*numNodePerTor+j)*numSlotPerNode+k], bwNS);
+          }
+        }
+      }
+
+    }
+
+    void printAll() {
+      //printVerts( cores);
+      printVerts( tors);
+      //printVerts( nodes);
+      //printVerts( slots);
+    }
+
+    void printVerts( Vertex[] verts) {
+
+      for(int i=0; i<verts.length; i++) {
+        Vertex v = verts[i];
+
+        System.out.print(v.type+"["+v.id+"] outlinks: ");
+        for(Link l : v.outLinks){
+          System.out.print(l.dstVert.type+"["+l.dstVert.id+"]-"+l.linkBw+"/"+l.linkBwMax+"  ");
+        }
+
+        System.out.print("\n      inlinks: ");
+        for(Link l : v.inLinks){
+          System.out.print(l.srcVert.type+"["+l.srcVert.id+"]-"+l.linkBw+"/"+l.linkBwMax+"  ");
+        }
+
+        System.out.print("\n===================\n");
+      }
+    }
+
+    //Cluster End Here
   }
 
 }
