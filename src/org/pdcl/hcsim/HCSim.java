@@ -43,6 +43,8 @@ public class HCSim {
   }
 
   private class SimHadoop {
+
+    static final int DFS_REPLICATION = 3;
   
     HadoopJobs jobs;
     HadoopTasks tasks;
@@ -57,10 +59,15 @@ public class HCSim {
     }
 
     void scheduleTasks() {
-      while(!cluster.idlersIsEmpty() && !tasks.isEmpty()) {
-        //tasks.poll();
-        //task.finishedFlow = 0, task.numFlow = nmap*nred, create read flows
-      }
+      tasks.schedule();
+    }
+
+    void addTask(Task t) {
+      tasks.add(t);
+    }
+
+    void finishTask(Task t) {
+      tasks.finish(t);
     }
     
     private class HadoopJobs {
@@ -100,47 +107,41 @@ public class HCSim {
 
       void submitJobs() {
         for(int i=0; i<numJob; i++) {
-          events.eventAdd( jobs[i].submitTick, 1, i, jobs[i].toString());
+          JobEvent e = new JobEvent(jobs[i]);
+          events.addEvent(e);
         }
       }
 
-      private class Job {
-        int id;
-        int submitTick;//0.1ms
-        String name;
-        double inputSize;//KB
-        double shuffleSize;
-        double outputSize;
-        double blockSize;
-        int numMapTask;
-        int numReduceTask;
-        int stage;// 0-created, 
+    }
 
-        Job( int id, String name, int submitTime, long inputBytes, long shuffleBytes, long outputBytes, int numMapTask, int numReduceTask) {
-          this.id = id;
-          this.name = name;
+    private class JobEvent extends BaseEvent {
+      Job j;
 
-          this.submitTick = submitTime*10000;
-          this.inputSize = inputBytes/1024.0;
-          this.shuffleSize = shuffleBytes/1024.0;
-          this.outputSize = outputBytes/1024.0;
-          this.blockSize = 128*1024.0;
+      JobEvent(Job j) {
+        super(j.submitTick, 1, j.toString());
+        this.j = j;
+      }
 
-          this.numMapTask = numMapTask;
-          this.numReduceTask = numReduceTask;
-
-          this.stage = 0;
+      @Override
+      void handle() {
+        int numTask, numSrc;
+        if(j.numReduceTask > 0){
+          numTask = j.numReduceTask;
+          numSrc = j.numMapTask;
+        }
+        else {
+          numTask = j.numMapTask;
+          numSrc = 0;
         }
 
-        public String toString() {
-          if(numReduceTask > 0)
-            return "j["+id+"](N"+name+" T"+submitTick+" M"+numMapTask+" r"+numReduceTask+" Mw0"+" Mo"+(int)(shuffleSize/numMapTask/1024)+" R"+numReduceTask+" Ri"+(int)(shuffleSize/numReduceTask/1024)+" Rw"+(int)(outputSize/numReduceTask/1024)+")";
-          else
-            return "j["+id+"](N"+name+" T"+submitTick+" M"+numMapTask+" r"+numReduceTask+" Mw"+(int)(outputSize/numMapTask/1024)+" Mo0 Ri0 Rw0)";
+        double inputSize = j.shuffleSize/numTask;
+        double outputSize = j.outputSize/numTask;
+        for(int i=0; i<numTask; i++) {
+          Task t = new Task( j, numSrc, DFS_REPLICATION, inputSize, outputSize);
+          hadoop.addTask(t);
         }
       }
     }
-
     
     private class HadoopTasks {
       LinkedList<Task> queuedTasks;
@@ -154,8 +155,8 @@ public class HCSim {
         utid = 0;
       }
 
-      void add(int jobId, int numSrc, int numDst, double inputSize, double outputSize) {
-        Task t = new Task( utid++, jobId, numSrc, numDst, inputSize, outputSize);
+      void add(Task t) {
+        t.setId(utid++);
         queuedTasks.add(t);
       }
 
@@ -163,40 +164,165 @@ public class HCSim {
         return queuedTasks.poll();
       }
 
-      boolean isEmpty() {
-        return queuedTasks.isEmpty();
+      void schedule() {
+        while(!cluster.idlersIsEmpty() && !queuedTasks.isEmpty()) {
+          Task t = queuedTasks.poll();
+          t.unit = cluster.getIdler();
+
+          activeTasks.add(t);
+          cluster.runTask(t);
+        }
       }
 
+      void finish(Task t) {
+        activeTasks.remove(t);
+      }
 
-      private class Task {
-        int id;
-        int jobId;
-        int taskId;
-        int numSrc;
-        int numDst;
-        double inputSize;
-        double outputSize;
+    }
 
-        int numFinished;
-        int[] srcNodeIds;
-        int[] dstNodeIds;
+    private class TaskEvent extends BaseEvent {
+      Task t;
 
-        Task(int id, int jobId, int numSrc, int numDst, double inputSize, double outputSize) {
-          this.id = id;
-          this.jobId = jobId;
-          this.taskId = taskId;
-          this.numSrc = numSrc;
-          this.numDst = numDst;
-          this.inputSize = inputSize;
-          this.outputSize = outputSize;
+      TaskEvent(Task t) {
+        super(5);
+        this.t = t;
+      }
 
-          numFinished = -1;
-          srcNodeIds = new int[numSrc];
+      @Override
+      void handle() {
+        if(t.status == 0){
+          t.status = 1;
+          cluster.runTask(t);
+        }
+        else{
+          hadoop.finishTask(t);
+          cluster.setIdle(t.unit);
         }
       }
     }
   }
+
+  private class Job {
+    int id;
+    int submitTick;//0.1ms
+    String name;
+    double inputSize;//KB
+    double shuffleSize;
+    double outputSize;
+    double blockSize;
+    int numMapTask;
+    int numReduceTask;
+    int stage;// 0-created, 
+
+    Job( int id, String name, int submitTime, long inputBytes, long shuffleBytes, long outputBytes, int numMapTask, int numReduceTask) {
+      this.id = id;
+      this.name = name;
+
+      this.submitTick = submitTime*10000;
+      this.inputSize = inputBytes/1024.0;
+      this.shuffleSize = shuffleBytes/1024.0;
+      this.outputSize = outputBytes/1024.0;
+      this.blockSize = 128*1024.0;
+
+      this.numMapTask = numMapTask;
+      this.numReduceTask = numReduceTask;
+
+      this.stage = 0;
+    }
+
+    public String toString() {
+      if(numReduceTask > 0)
+        return "j["+id+"](N"+name+" T"+submitTick+" M"+numMapTask+" r"+numReduceTask+" Mw0"+" Mo"+(int)(shuffleSize/numMapTask/1024)+" R"+numReduceTask+" Ri"+(int)(shuffleSize/numReduceTask/1024)+" Rw"+(int)(outputSize/numReduceTask/1024)+")";
+      else
+        return "j["+id+"](N"+name+" T"+submitTick+" M"+numMapTask+" r"+numReduceTask+" Mw"+(int)(outputSize/numMapTask/1024)+" Mo0 Ri0 Rw0)";
+    }
+  }
   
+  private class Task {
+    int id;
+    Job job;
+    Vertex unit;
+    int numSrc;
+    int numDst;
+    double inputSize;
+    double outputSize;
+
+    int numFinished;
+    //int[] srcNodeIds;
+    //int[] dstNodeIds;
+
+    int status;//0-reading, 1-writing
+
+    Task(Job job, int numSrc, int numDst, double inputSize, double outputSize) {
+      this.id = -1;
+      this.job = job;
+      this.numSrc = numSrc;
+      this.numDst = numDst;
+      this.inputSize = inputSize;
+      this.outputSize = outputSize;
+      this.unit = null;
+
+      if(numSrc > 0)
+        this.status = 0;
+      else
+        this.status = 1;
+    }
+
+    void setId(int id) {
+      this.id = id;
+    }
+
+    public String toString() {
+      return "this is a task";
+    }
+  }
+
+  private class BaseEvent {
+
+    int id;
+    int tick;
+    int type;// 0-time 0, 1-job arrived, 2-read finished, 3-write finished, 4-flow finished
+    String msg;
+
+    BaseEvent( int type) {
+      this.id = -1;
+      this.tick = -1;
+      this.type = type;
+    }
+
+    BaseEvent( int tick, int type) {
+      this.id = -1;
+      this.tick = tick;
+      this.type = type;
+    }
+
+    BaseEvent( int tick, int type, String msg) {
+      this.id = -1;
+      this.tick = tick;
+      this.type = type;
+      this.msg = msg;
+    }
+
+    void setId(int id) {
+      this.id = id;
+    }
+
+    void print() {
+      System.out.println("Tick: "+tick+" Event: "+msg);
+    }
+
+    void handle() {
+      if(type == 2) {//read finished: task.finishedFlow = 0, task.numFlow = numReplica, create write flow
+      }
+
+      if(type == 3) {//write finished: job.finishedTask++, free node
+      }
+
+      if(type == 4) {//flow finished: task.finishedFlow++, if task.finishedFlow < task.numFlow then create flow else create r/w finished
+      }
+    }
+
+  }
 
 
 
@@ -206,17 +332,17 @@ public class HCSim {
     int curTick;
     int end;
     //EventComparator queuedEventListCom;
-    //PriorityQueue<Event> queuedEventList;
-    LinkedList<Event> queuedEventList;
-    LinkedList<Event> currentEventList;
+    //PriorityQueue<BaseEvent> queuedEventList;
+    LinkedList<BaseEvent> queuedEventList;
+    LinkedList<BaseEvent> currentEventList;
 
     SimEvents() {
       this.curTick = 0;
       this.eId = 0;
       //this.queuedEventListCom = new EventComparator();
-      //this.queuedEventList = new PriorityQueue<Event>( 100, this.queuedEventListCom);
-      this.queuedEventList = new LinkedList<Event>();
-      this.currentEventList = new LinkedList<Event>();
+      //this.queuedEventList = new PriorityQueue<BaseEvent>( 100, this.queuedEventListCom);
+      this.queuedEventList = new LinkedList<BaseEvent>();
+      this.currentEventList = new LinkedList<BaseEvent>();
       this.end = 24*3600*10000;//24hr
     }
 
@@ -233,69 +359,30 @@ public class HCSim {
       curTick++;
     }
 
-    void eventAdd(int tick, int type, int value, String msg) {
-      Event e = new Event( eId++, tick, type, value, msg);
-      queuedEventList.add(e);
+    void addEvent(BaseEvent e) {
+      e.setId(eId++);
+      if(e.tick > curTick)
+        queuedEventList.add(e);
+      else
+        currentEventList.add(e);
     }
 
-    void eventAdd( int type, int value) {
-      Event e = new Event( eId++, curTick, type, value, null);
-      currentEventList.add(e);
-    }
-
-    Event eventPoll() {
+    BaseEvent eventPoll() {
       return queuedEventList.poll();
     }
 
     void print() {
       while(!queuedEventList.isEmpty()) {
-        Event e = eventPoll();
+        BaseEvent e = eventPoll();
         e.print();
       }
     }
 
-    private class EventComparator implements Comparator<Event> {
+    private class BaseEventComparator implements Comparator<BaseEvent> {
       @Override
-      public int compare( Event e1, Event e2) {
+      public int compare( BaseEvent e1, BaseEvent e2) {
         return e1.tick - e2.tick;
       }
-    }
-
-    private class Event {
-
-      int id;
-      int tick;
-      int type;// 0-time 0, 1-job arrived, 2-read finished, 3-write finished, 4-flow finished
-      int value;
-      String msg;
-
-      Event( int id, int tick, int type, int value, String msg) {
-        this.id = id;
-        this.tick = tick;
-        this.type = type;
-        this.value = value;
-        this.msg = msg;
-      }
-
-      void print() {
-        System.out.println("Tick: "+tick+" Event: "+msg);
-      }
-
-      void handle() {
-        if(type == 1) {//job arrived: create tasks
-          
-        }
-
-        if(type == 2) {//read finished: task.finishedFlow = 0, task.numFlow = numReplica, create write flow
-        }
-
-        if(type == 3) {//write finished: job.finishedTask++, free node
-        }
-
-        if(type == 4) {//flow finished: task.finishedFlow++, if task.finishedFlow < task.numFlow then create flow else create r/w finished
-        }
-      }
-
     }
 
   }
@@ -304,16 +391,19 @@ public class HCSim {
 
   private class SimCluster {
     
-    int numCore = 0;
-    int numTor = 0;
-    int numNodePerTor = 0;
+    int numCore;
+    int numTor;
+    int numNodePerTor;
 
-    double bwCT = 0;
-    double bwTN = 0;
+    double bwCT;
+    double bwTN;
 
-    Vertex[] cores = null;
-    Vertex[] tors = null;
-    Vertex[] nodes = null;
+    Vertex[] cores;
+    Vertex[] tors;
+    Vertex[] nodes;
+
+    int numUnit;
+    Vertex[] units;
 
     LinkedList<Vertex> idlers;
     int fId;
@@ -337,6 +427,9 @@ public class HCSim {
       flows = new LinkedList<Flow>();
       flowsNext = new LinkedList<Flow>();
       randomGenerator = new Random();
+
+      numUnit = numNodePerTor*numTor;
+      units = nodes;
     }
 
     void createVertex() {
@@ -377,26 +470,45 @@ public class HCSim {
       return idlers.isEmpty();
     }
 
+    void setIdle(Vertex v) {
+      idlers.add(v);
+    }
+
+    Vertex getIdler() {
+      return idlers.poll();
+    }
+
     void setAllIdle() {
-      for(int i=0; i<numNodePerTor*numTor; i++) {
-        idlers.add(nodes[i]);
+      for(int i=0; i<numUnit; i++) {
+        idlers.add(units[i]);
       }
     }
 
-    void addIdler(int i) {
-      idlers.add(nodes[i]);
+    void addIdler(Vertex v) {
+      idlers.add(v);
     }
 
-    int pollIdler() {
-      Vertex v = idlers.poll();
-      if(v == null)
-        return -1;
-      else
-        return v.id;
+    void runTask(Task t) {
+      if(t.status == 0) {
+        double dataSize = t.inputSize/t.numSrc;
+        for(int i=0; i<t.numSrc; i++) {
+          Vertex u = units[randomGenerator.nextInt(numUnit)];
+          Flow f = new Flow( t, u, t.unit, dataSize);
+          addFlow(f);
+        }
+      }
+      else {
+        double dataSize = t.outputSize/t.numDst;
+        for(int i=0; i<t.numDst; i++) {
+          Vertex u = units[randomGenerator.nextInt(numUnit)];
+          Flow f = new Flow( t, t.unit, u, dataSize);
+          addFlow(f);
+        }
+      }
     }
 
-    void addFlow( int srcId, int dstId, double dataSize, int taskId) {
-      Flow f = new Flow( fId++, srcId, dstId, dataSize, taskId);
+    void addFlow(Flow f) {
+      f.setId(fId++);
       flowsNext.add(f);
     }
 
@@ -414,9 +526,9 @@ public class HCSim {
           for(Edge e : f.edgeRoute) {
             e.bw += f.bw;
           }
-          events.eventAdd( 4, f.taskId);
+          //events.addEvent( 4, f.taskId);
         }
-        else{
+        else {
           double delta = 0.1;
           for(Edge e : f.edgeRoute) {
             if(e.bw + delta >= e.bwMax){
@@ -462,7 +574,7 @@ public class HCSim {
 
     private class Flow {
       int id;
-      int taskId;
+      Task task;
       Vertex src;
       Vertex dst;
 
@@ -475,17 +587,21 @@ public class HCSim {
       LinkedList<Edge> edgeRoute;
 
 
-      Flow( int id, int srcId, int dstId, double dataSize, int taskId) {
-        this.id = id;
-        this.taskId = taskId;
-        this.src = nodes[srcId];
-        this.dst = nodes[dstId];
+      Flow( Task task, Vertex src, Vertex dst, double dataSize) {
+        this.id = -1;
+        this.task = task;
+        this.src = src;
+        this.dst = dst;
         this.dataSize = dataSize;
         this.finishedSize = 0;
         this.bw = 0.1;//init 1MB/s
         this.edgeRoute = new LinkedList<Edge>();
 
         createRoute();
+      }
+
+      void setId(int id) {
+        this.id = id;
       }
 
       void createRoute() {
@@ -503,67 +619,66 @@ public class HCSim {
         edgeRoute.add(tors[dstTorId].getEdgeTo(dst));
       }
     }
+  }//SimCluster End Here
 
-    private class Vertex {
+  private class Vertex {
 
-      int type;// 1core, 2tor, 3node, 4slot
-      int id;
+    int type;// 1core, 2tor, 3node, 4slot
+    int id;
 
-      LinkedList<Edge> outEdges;
-      LinkedList<Edge> inEdges;
+    LinkedList<Edge> outEdges;
+    LinkedList<Edge> inEdges;
 
-      //LinkedList<Flow> flows;
+    //LinkedList<Flow> flows;
 
-      Vertex(int type, int id) {
-        this.type = type;
-        this.id = id;
-        this.outEdges = new LinkedList<Edge>();
-        this.inEdges = new LinkedList<Edge>();
-        //this.flows = new LinkedList<Flow>();
-      }
+    Vertex(int type, int id) {
+      this.type = type;
+      this.id = id;
+      this.outEdges = new LinkedList<Edge>();
+      this.inEdges = new LinkedList<Edge>();
+      //this.flows = new LinkedList<Flow>();
+    }
 
-      void connectWith( Vertex v, double bw) {
-        Edge out = new Edge( this, v, bw);
-        Edge in = new Edge( v, this, bw);
+    void connectWith( Vertex v, double bw) {
+      Edge out = new Edge( this, v, bw);
+      Edge in = new Edge( v, this, bw);
 
-        this.outEdges.add(out);
-        this.inEdges.add(in);
-        v.outEdges.add(in);
-        v.inEdges.add(out);
-      }
+      this.outEdges.add(out);
+      this.inEdges.add(in);
+      v.outEdges.add(in);
+      v.inEdges.add(out);
+    }
 
-      Edge getEdgeTo(Vertex v) {
-        if(!outEdges.isEmpty()){
-          for(Edge e : outEdges) {
-            if(e.dstVert == v)
-              return e;
-          }
+    Edge getEdgeTo(Vertex v) {
+      if(!outEdges.isEmpty()){
+        for(Edge e : outEdges) {
+          if(e.dstVert == v)
+            return e;
         }
-        return null;
       }
-
+      return null;
     }
 
-    private class Edge {
-
-      Vertex srcVert;
-      Vertex dstVert;
-
-      double bw;
-      double bwMax;
-
-      //LinkedList<Flow> flows;
-
-      Edge( Vertex srcVert, Vertex dstVert, double bwMax) {
-        this.srcVert = srcVert;
-        this.dstVert = dstVert;
-        this.bwMax = bwMax;
-        this.bw = 0;
-        //this.flows = new LinkedList<Flow>();
-      }
-    }
-    //SimCluster End Here
   }
 
-}
+  private class Edge {
 
+    Vertex srcVert;
+    Vertex dstVert;
+
+    double bw;
+    double bwMax;
+
+    //LinkedList<Flow> flows;
+
+    Edge( Vertex srcVert, Vertex dstVert, double bwMax) {
+      this.srcVert = srcVert;
+      this.dstVert = dstVert;
+      this.bwMax = bwMax;
+      this.bw = 0;
+      //this.flows = new LinkedList<Flow>();
+    }
+  }
+  
+
+}
